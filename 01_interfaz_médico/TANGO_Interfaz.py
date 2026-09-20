@@ -1,7 +1,19 @@
 import streamlit as st
 import base64
+import csv
+import html
+import io
+import json
 import re
+import time
 from pathlib import Path
+
+try:
+    import serial
+    from serial.tools import list_ports
+except ImportError:
+    serial = None
+    list_ports = None
 
 # ============================================================
 # CONFIGURACIÓN DE PÁGINA
@@ -15,6 +27,54 @@ st.set_page_config(
 # ============================================================
 # FUNCIONES DE VALIDACIÓN Y UTILIDADES
 # ============================================================
+BAUD_TANGO = 115200
+BOOT_WAIT_SECONDS = 2.0
+SERIAL_TIMEOUT_SECONDS = 4.0
+
+ALERTAS_INFO = {
+    "BATERIA BAJA": (
+        "BATERÍA BAJA",
+        "Nivel de batería reducido."
+    ),
+    "SENAL NO CONFIABLE": (
+        "SEÑAL NO CONFIABLE",
+        "La señal pulsátil no permite una evaluación confiable."
+    ),
+    "PRESION NO SOSTENIDA": (
+        "PRESIÓN NO SOSTENIDA",
+        "No se logra mantener estable la presión aplicada."
+    ),
+    "SOBREPRESION": (
+        "SOBREPRESIÓN",
+        "La presión aplicada superó el límite configurado."
+    ),
+    "PRESION NO ALCANZADA": (
+        "PRESIÓN NO ALCANZADA",
+        "No se logró alcanzar la presión objetivo."
+    ),
+    "OCLUSION NO ALCANZADA": (
+        "OCLUSIÓN NO ALCANZADA",
+        "No se alcanzó el criterio de oclusión esperado."
+    ),
+    "BATERIA CRITICA": (
+        "BATERÍA CRÍTICA",
+        "Nivel de batería críticamente bajo."
+    ),
+    "PRESION NO DISPONIBLE": (
+        "PRESIÓN NO DISPONIBLE",
+        "No se dispone de una medición válida de presión."
+    ),
+    "PERDIDA DE OCLUSION": (
+        "PÉRDIDA DE OCLUSIÓN",
+        "Se perdió el criterio de oclusión previamente alcanzado."
+    ),
+    "AUTOCOMPROBACION FALLIDA": (
+        "AUTOCOMPROBACIÓN FALLIDA",
+        "La comprobación inicial del sistema no fue superada."
+    ),
+}
+
+
 def get_image_base64(image_path):
     """Convierte una imagen local en cadena Base64."""
     try:
@@ -23,12 +83,14 @@ def get_image_base64(image_path):
     except Exception:
         return None
 
+
 def validar_solo_letras(texto):
     """Valida que el texto solo contenga letras, espacios y caracteres acentuados."""
     if not texto or not texto.strip():
         return False
     patron = r"^[a-zA-ZáéíóúÁÉÍÓÚñÑ\s]+$"
     return bool(re.match(patron, texto.strip()))
+
 
 def validar_formato_hora(hora_str):
     """Valida formato de hora HH:MM (24 horas). Opcional si está vacío."""
@@ -37,31 +99,249 @@ def validar_formato_hora(hora_str):
     patron = r"^(?:[01]\d|2[0-3]):[0-5]\d$"
     return bool(re.match(patron, hora_str.strip()))
 
-def obtener_clase_alerta(texto_alerta):
-    """Asigna una clase CSS según la naturaleza/gravedad de la alarma."""
-    texto_upper = texto_alerta.upper()
-    if "PÉRDIDA" in texto_upper or "CRÍTICA" in texto_upper:
-        return "alarm-critical"  # Rojo
-    elif "RANGO" in texto_upper or "PRESIÓN" in texto_upper:
-        return "alarm-warning"   # Ámbar / Naranja
-    elif "TIEMPO" in texto_upper or "EXCEDIDO" in texto_upper:
-        return "alarm-info"      # Azul
-    return "alarm-default"       # Púrpura / Neutro
+
+def formatear_tiempo(segundos):
+    """Convierte segundos de tiempo relativo a HH:MM:SS."""
+    try:
+        total = max(0, int(segundos))
+    except (TypeError, ValueError):
+        return "—"
+    horas = total // 3600
+    minutos = (total % 3600) // 60
+    seg = total % 60
+    return f"{horas:02d}:{minutos:02d}:{seg:02d}"
+
+
+def obtener_clase_alerta(tipo_alerta):
+    """Usa la severidad explícita enviada por TANGO."""
+    return "alarm-critical" if str(tipo_alerta).lower() == "alarma" else "alarm-warning"
+
+
+def metadata_alerta(codigo_o_texto):
+    clave = str(codigo_o_texto or "").strip().upper()
+    return ALERTAS_INFO.get(clave, (clave or "ALERTA DEL SISTEMA", ""))
+
+
+def adaptar_registro_tango(raw):
+    """Adapta el JSON del ESP32 al formato de visualización del informe."""
+    metricas_raw = raw.get("metricas", {})
+    sesion_raw = raw.get("sesion", {})
+
+    reajustes = []
+    for evento in raw.get("reajustes", []):
+        reajustes.append({
+            "momento": formatear_tiempo(evento.get("t_s")),
+            "duracion": formatear_tiempo(evento.get("duracion_s")),
+            "de_mmHg": evento.get("de_mmHg"),
+            "a_mmHg": evento.get("a_mmHg"),
+        })
+
+    alertas = []
+    for evento in raw.get("alertas", []):
+        codigo = evento.get("codigo") or evento.get("texto", "")
+        nombre, descripcion = metadata_alerta(codigo)
+        alertas.append({
+            "tipo": evento.get("tipo", "aviso"),
+            "texto": nombre,
+            "momento": formatear_tiempo(evento.get("t_s")),
+            "detalle": descripcion,
+        })
+
+    return {
+        "record_id": raw.get("record_id", "—"),
+        "firmware": raw.get("firmware", "—"),
+        "sesion": {
+            "duracion_s": sesion_raw.get("duracion_s"),
+            "duracion": formatear_tiempo(sesion_raw.get("duracion_s")),
+        },
+        "metricas": {
+            "tiempo_oclusion_total": formatear_tiempo(
+                metricas_raw.get("tiempo_oclusion_total_s")
+            ),
+            "presion_alcanzar_oclusion_mmHg": metricas_raw.get(
+                "presion_alcanzar_oclusion_mmHg"
+            ),
+            "presion_maxima_mmHg": metricas_raw.get("presion_maxima_mmHg"),
+            "tiempo_hasta_oclusion_inicial": formatear_tiempo(
+                metricas_raw.get("tiempo_hasta_oclusion_inicial_s")
+            ),
+            "reajustes_automaticos": metricas_raw.get("reajustes_automaticos", 0),
+        },
+        "reajustes": reajustes,
+        "alertas": alertas,
+        "_raw": raw,
+    }
+
+
+def puerto_abierto():
+    conexion = st.session_state.get("tango_serial")
+    return conexion is not None and getattr(conexion, "is_open", False)
+
+
+def cerrar_tango():
+    conexion = st.session_state.get("tango_serial")
+    if conexion is not None:
+        try:
+            conexion.close()
+        except Exception:
+            pass
+    st.session_state.tango_serial = None
+    st.session_state.tango_port = None
+    st.session_state.registros_disponibles = []
+
+
+def abrir_tango(puerto):
+    if serial is None:
+        raise RuntimeError("Falta pyserial. Instalalo con: uv pip install pyserial")
+
+    cerrar_tango()
+
+    conexion = serial.Serial(
+        port=None,
+        baudrate=BAUD_TANGO,
+        timeout=0.15,
+        write_timeout=1.0,
+        xonxoff=False,
+        rtscts=False,
+        dsrdtr=False,
+    )
+    conexion.dtr = False
+    conexion.rts = False
+    conexion.port = puerto
+    conexion.open()
+
+    # Algunos adaptadores USB-UART reinician el ESP32 al abrir el puerto.
+    time.sleep(BOOT_WAIT_SECONDS)
+    try:
+        conexion.reset_input_buffer()
+        conexion.reset_output_buffer()
+    except Exception:
+        pass
+
+    st.session_state.tango_serial = conexion
+    st.session_state.tango_port = puerto
+
+
+def leer_json_enmarcado(inicio, fin, timeout_s=SERIAL_TIMEOUT_SECONDS):
+    conexion = st.session_state.get("tango_serial")
+    if conexion is None or not getattr(conexion, "is_open", False):
+        raise RuntimeError("TANGO no está conectado.")
+
+    limite = time.monotonic() + timeout_s
+    capturando = False
+    lineas = []
+
+    while time.monotonic() < limite:
+        bruto = conexion.readline()
+        if not bruto:
+            time.sleep(0.02)
+            continue
+
+        linea = bruto.decode("utf-8", errors="replace").strip()
+        if not linea:
+            continue
+
+        if linea.startswith("###TANGO_ERROR###"):
+            detalle = linea.replace("###TANGO_ERROR###", "", 1)
+            try:
+                mensaje = json.loads(detalle).get("message", "Error informado por TANGO.")
+            except Exception:
+                mensaje = detalle or "Error informado por TANGO."
+            raise RuntimeError(mensaje)
+
+        if linea == inicio:
+            capturando = True
+            lineas = []
+            continue
+
+        if linea == fin and capturando:
+            payload = "".join(lineas)
+            return json.loads(payload)
+
+        if capturando:
+            lineas.append(linea)
+
+    raise TimeoutError("TANGO no respondió dentro del tiempo esperado.")
+
+
+def enviar_comando_tango(comando, inicio, fin):
+    conexion = st.session_state.get("tango_serial")
+    if conexion is None or not getattr(conexion, "is_open", False):
+        raise RuntimeError("TANGO no está conectado.")
+
+    try:
+        conexion.reset_input_buffer()
+    except Exception:
+        pass
+
+    conexion.write((comando + "\n").encode("ascii"))
+    conexion.flush()
+    return leer_json_enmarcado(inicio, fin)
+
+
+def solicitar_lista_registros():
+    respuesta = enviar_comando_tango(
+        "@LIST",
+        "###TANGO_LIST_BEGIN###",
+        "###TANGO_LIST_END###",
+    )
+    registros = respuesta.get("records", [])
+    if not isinstance(registros, list):
+        raise ValueError("La lista de registros recibida no tiene el formato esperado.")
+    return registros
+
+
+def solicitar_registro(record_id):
+    return enviar_comando_tango(
+        f"@GET:{record_id}",
+        "###TANGO_RECORD_BEGIN###",
+        "###TANGO_RECORD_END###",
+    )
+
+
+
+def listar_puertos():
+    if list_ports is None:
+        return []
+    try:
+        return sorted(list_ports.comports(), key=lambda p: p.device)
+    except Exception:
+        return []
+
 
 # ============================================================
 # ESTADO DE LA SESIÓN (PERSISTENCIA DE DATOS)
 # ============================================================
 if "paso" not in st.session_state:
-    st.session_state.paso = "formulario"
+    st.session_state.paso = "registro"
 
 if "datos_clinicos" not in st.session_state:
     st.session_state.datos_clinicos = {
-        "nombre_paciente": "Juan Pérez",
-        "hc_paciente": "HC-884920",
-        "extremidad": "Miembro inferior derecho",
-        "hora_retiro": "14:15",
+        "nombre_paciente": "",
+        "hc_paciente": "",
+        "extremidad": "",
+        "hora_retiro": "",
         "notas_medico": ""
     }
+
+if "tango_serial" not in st.session_state:
+    st.session_state.tango_serial = None
+
+if "tango_port" not in st.session_state:
+    st.session_state.tango_port = None
+
+if "registros_disponibles" not in st.session_state:
+    st.session_state.registros_disponibles = []
+
+if "registro_tango" not in st.session_state:
+    st.session_state.registro_tango = None
+
+if "registro_tango_raw" not in st.session_state:
+    st.session_state.registro_tango_raw = None
+
+if "estado_tango" not in st.session_state:
+    st.session_state.estado_tango = "Desconectado."
+
 
 # ============================================================
 # ESTILOS CSS PERSONALIZADOS
@@ -339,99 +619,222 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ============================================================
-# DATOS DE SESIÓN Y OPCIONES DE ALERTAS
-# ============================================================
-REPORTE_DEMO = {
-    "paciente": {
-        "nombre": "Juan Pérez",
-        "id_paciente": "HC-884920",
-        "edad": "45 años"
-    },
-    "sesion": {
-        "fecha": "2026-09-16",
-        "hora_inicio": "14:02:10",
-        "hora_fin": "14:09:28"
-    },
-    "metricas": {
-        "presion_promedio_mmHg": 218,
-        "tiempo_oclusion_total": "00:07:18",
-        "presion_alcanzar_oclusion_mmHg": 232,
-        "presion_maxima_mmHg": 242,
-        "tiempo_hasta_oclusion_inicial": "00:00:24",
-        "reajustes_automaticos": 2
-    },
-    "reajustes": [
-        {"hora": "14:03:42", "duracion": "00:00:06", "de_mmHg": 224, "a_mmHg": 232},
-        {"hora": "14:07:12", "duracion": "00:00:05", "de_mmHg": 204, "a_mmHg": 218}
-    ],
-    "alertas": [
-        {
-            "tipo": "alarma",
-            "texto": "ALARMA · PÉRDIDA DE OCLUSIÓN",
-            "hora": "14:07:18",
-            "detalle": "Presión cayó por debajo del umbral de oclusión. Reajuste iniciado."
-        },
-        {
-            "tipo": "alarma",
-            "texto": "ALARMA · PRESIÓN FUERA DE RANGO",
-            "hora": "14:05:10",
-            "detalle": "Desviación detectada respecto al setpoint configurado."
-        },
-        {
-            "tipo": "alarma",
-            "texto": "ALARMA · TIEMPO EXCEDIDO DE OCLUSIÓN",
-            "hora": "14:08:00",
-            "detalle": "Aviso preventivo por tiempo de torniquete acumulado."
-        }
-    ]
-}
 
-# Imagen base64 local si existe logo.png
+
+# ============================================================
+# LOGO
+# ============================================================
 LOGO_B64 = get_image_base64("logo.png")
 img_tag = f'<img src="data:image/png;base64,{LOGO_B64}" class="header-logo-img" />' if LOGO_B64 else ''
 
 # ============================================================
-# VENTANA 1: FORMULARIO DE INGRESO DE DATOS
+# VENTANA 1: CONECTAR TANGO Y SELECCIONAR REGISTRO
 # ============================================================
-if st.session_state.paso == "formulario":
-    
-    header_html_form = f'<div class="header-box"><div class="header-brand-container">{img_tag}<div><div class="brand-title">TANGO</div><div class="brand-sub">Torniquete Automático Neumático</div></div></div></div>'
+if st.session_state.paso == "registro":
+
+    header_html = (
+        f'<div class="header-box"><div class="header-brand-container">{img_tag}<div>'
+        f'<div class="brand-title">TANGO</div>'
+        f'<div class="brand-sub">Torniquete Automático Neumático</div>'
+        f'</div></div></div>'
+    )
+    st.markdown(header_html, unsafe_allow_html=True)
+
+    st.markdown(
+        '<div class="report-card">'
+        '<div class="card-title">Cargar registro del dispositivo</div>'
+        '<div style="color:#475569; font-size:14px; line-height:1.5;">'
+        'Conectá TANGO por USB, seleccioná el puerto del dispositivo y elegí el registro que querés consultar.'
+        '</div></div>',
+        unsafe_allow_html=True,
+    )
+
+    if serial is None:
+        st.error("No está instalado pyserial. Ejecutá `uv pip install pyserial` y reiniciá Streamlit.")
+    else:
+        puertos = listar_puertos()
+        etiquetas = [f"{p.device} — {p.description}" for p in puertos]
+        mapa_puertos = {f"{p.device} — {p.description}": p.device for p in puertos}
+
+        if puerto_abierto() and st.session_state.tango_port not in mapa_puertos.values():
+            etiqueta_actual = f"{st.session_state.tango_port} — conectado"
+            etiquetas.insert(0, etiqueta_actual)
+            mapa_puertos[etiqueta_actual] = st.session_state.tango_port
+
+        if etiquetas:
+            indice = 0
+            if st.session_state.tango_port:
+                for i, etiqueta in enumerate(etiquetas):
+                    if mapa_puertos.get(etiqueta) == st.session_state.tango_port:
+                        indice = i
+                        break
+
+            puerto_elegido = st.selectbox(
+                "Puerto USB",
+                etiquetas,
+                index=indice,
+                disabled=puerto_abierto(),
+            )
+        else:
+            puerto_elegido = None
+            st.info("No se detectaron puertos serie. Conectá el ESP32 por USB y recargá la página.")
+
+        col_conectar, col_actualizar = st.columns(2)
+
+        with col_conectar:
+            if not puerto_abierto():
+                if st.button("Conectar TANGO", disabled=puerto_elegido is None):
+                    try:
+                        abrir_tango(mapa_puertos[puerto_elegido])
+                        st.session_state.registros_disponibles = solicitar_lista_registros()
+                        st.session_state.estado_tango = (
+                            f"Conectado a {st.session_state.tango_port} · {BAUD_TANGO} baudios."
+                        )
+                        st.rerun()
+                    except Exception as exc:
+                        cerrar_tango()
+                        st.session_state.estado_tango = f"No se pudo conectar: {exc}"
+                        st.error(
+                            "No se pudo abrir TANGO. Cerrá el Monitor Serie, el Plotter Serie "
+                            "y cualquier otro programa que esté usando el mismo puerto."
+                        )
+            else:
+                if st.button("Desconectar TANGO"):
+                    cerrar_tango()
+                    st.session_state.estado_tango = "Desconectado."
+                    st.rerun()
+
+        with col_actualizar:
+            if st.button("Actualizar registros", disabled=not puerto_abierto()):
+                try:
+                    st.session_state.registros_disponibles = solicitar_lista_registros()
+                    st.session_state.estado_tango = "Lista de registros actualizada."
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"No se pudo leer la lista de registros: {exc}")
+
+        if puerto_abierto():
+            st.success(st.session_state.estado_tango)
+        else:
+            st.caption(st.session_state.estado_tango)
+
+        if puerto_abierto():
+            registros = st.session_state.registros_disponibles
+
+            if registros:
+                opciones = []
+                por_etiqueta = {}
+                for item in registros:
+                    rid = item.get("record_id", "")
+                    label = item.get("label", "")
+                    etiqueta = f"{rid} — {label}" if label else rid
+                    opciones.append(etiqueta)
+                    por_etiqueta[etiqueta] = rid
+
+                registro_elegido = st.selectbox(
+                    "Registro disponible en TANGO",
+                    opciones,
+                    key="selector_registro_tango",
+                )
+
+                if st.button("Cargar registro", type="primary"):
+                    try:
+                        rid = por_etiqueta[registro_elegido]
+                        raw = solicitar_registro(rid)
+                        nuevo_registro = adaptar_registro_tango(raw)
+
+                        # Los datos clínicos se conservan mientras se siga trabajando
+                        # con el mismo registro. Si se carga otro procedimiento, se
+                        # limpian para evitar asociar datos de un paciente anterior.
+                        registro_anterior = st.session_state.get("registro_tango")
+                        id_anterior = (
+                            registro_anterior.get("record_id")
+                            if isinstance(registro_anterior, dict)
+                            else None
+                        )
+                        id_nuevo = nuevo_registro.get("record_id")
+
+                        if id_anterior != id_nuevo:
+                            st.session_state.datos_clinicos = {
+                                "nombre_paciente": "",
+                                "hc_paciente": "",
+                                "extremidad": "",
+                                "hora_retiro": "",
+                                "notas_medico": ""
+                            }
+
+                        st.session_state.registro_tango_raw = raw
+                        st.session_state.registro_tango = nuevo_registro
+                        st.session_state.estado_tango = f"Registro {rid} cargado correctamente."
+                        st.session_state.paso = "formulario"
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"No se pudo cargar el registro: {exc}")
+            else:
+                st.info("TANGO no informó registros disponibles.")
+
+# ============================================================
+# VENTANA 2: DATOS DEL PACIENTE
+# ============================================================
+elif st.session_state.paso == "formulario":
+
+    data = st.session_state.registro_tango
+    if data is None:
+        st.session_state.paso = "registro"
+        st.rerun()
+
+    record_id = data.get("record_id", "—")
+
+    header_html_form = (
+        f'<div class="header-box"><div class="header-brand-container">{img_tag}<div>'
+        f'<div class="brand-title">TANGO</div>'
+        f'<div class="brand-sub">Datos asociados al registro {html.escape(str(record_id))}</div>'
+        f'</div></div></div>'
+    )
     st.markdown(header_html_form, unsafe_allow_html=True)
+
+    if st.button("← Elegir otro registro"):
+        st.session_state.paso = "registro"
+        st.rerun()
+
+    st.success(f"Registro cargado: {record_id}")
 
     datos = st.session_state.datos_clinicos
 
     with st.form("form_inicial"):
-        st.markdown('<div class="card-title">Información del Paciente y Evaluación Clínica</div>', unsafe_allow_html=True)
-        
+        st.markdown(
+            '<div class="card-title">Información del Paciente y Evaluación Clínica</div>',
+            unsafe_allow_html=True,
+        )
+
         col1, col2 = st.columns(2)
         with col1:
             nombre_paciente = st.text_input(
-                "Nombre del Paciente * (Solo letras)", 
-                value=datos.get("nombre_paciente", "")
+                "Nombre del Paciente * (Solo letras)",
+                value=datos.get("nombre_paciente", ""),
             )
             hc_paciente = st.text_input(
-                "ID / Historia Clínica", 
-                value=datos.get("hc_paciente", "")
+                "ID / Historia Clínica",
+                value=datos.get("hc_paciente", ""),
             )
-        
+
         with col2:
             extremidad = st.text_input(
-                "Extremidad / Ubicación", 
+                "Extremidad / Ubicación",
                 value=datos.get("extremidad", ""),
-                placeholder="Ej: Miembro inferior derecho"
+                placeholder="Ej: Miembro inferior derecho",
             )
             hora_retiro = st.text_input(
-                "Hora de retiro (HH:MM)", 
+                "Hora de retiro (HH:MM)",
                 value=datos.get("hora_retiro", ""),
-                placeholder="HH:MM"
+                placeholder="HH:MM",
             )
 
         notas_medico = st.text_area(
-            "Notas del médico", 
+            "Notas del médico",
             value=datos.get("notas_medico", ""),
-            placeholder="Escriba aquí observaciones clínicas adicionales...", 
-            height=120
+            placeholder="Escriba aquí observaciones clínicas adicionales...",
+            height=120,
         )
 
         st.write("")
@@ -439,12 +842,16 @@ if st.session_state.paso == "formulario":
 
     if submit:
         errores = []
-        
+
         if not validar_solo_letras(nombre_paciente):
-            errores.append("El nombre del paciente solo debe contener letras y espacios (sin números o símbolos).")
-            
+            errores.append(
+                "El nombre del paciente solo debe contener letras y espacios (sin números o símbolos)."
+            )
+
         if not validar_formato_hora(hora_retiro):
-            errores.append("La hora de retiro debe tener el formato HH:MM (por ejemplo, 14:15).")
+            errores.append(
+                "La hora de retiro debe tener el formato HH:MM (por ejemplo, 14:15)."
+            )
 
         if errores:
             for err in errores:
@@ -455,112 +862,209 @@ if st.session_state.paso == "formulario":
                 "hc_paciente": hc_paciente.strip(),
                 "extremidad": extremidad.strip(),
                 "hora_retiro": hora_retiro.strip(),
-                "notas_medico": notas_medico.strip()
+                "notas_medico": notas_medico.strip(),
             }
             st.session_state.paso = "informe"
             st.rerun()
 
 # ============================================================
-# VENTANA 2: INFORME CLÍNICO GENERADO
+# VENTANA 3: INFORME CLÍNICO GENERADO
 # ============================================================
 elif st.session_state.paso == "informe":
-    
-    if st.button("← Volver a editar datos"):
+
+    if st.button("← Volver a editar datos del paciente"):
         st.session_state.paso = "formulario"
         st.rerun()
 
-    data = REPORTE_DEMO
-    clinicos = st.session_state.datos_clinicos
+    data = st.session_state.registro_tango
 
-    paciente = data.get("paciente", {})
+    if data is None:
+        st.warning("No hay un registro TANGO cargado.")
+        if st.button("Volver a seleccionar registro"):
+            st.session_state.paso = "registro"
+            st.rerun()
+        st.stop()
+
+    clinicos = st.session_state.datos_clinicos
     sesion = data.get("sesion", {})
     metricas = data.get("metricas", {})
     reajustes = data.get("reajustes", [])
-    
-    # Filtrar estrictamente cualquier alerta relacionada con batería
-    alertas_filtradas = [
-        a for a in data.get("alertas", []) 
-        if "BATER" not in a.get("texto", "").upper() and "BATER" not in a.get("detalle", "").upper()
-    ]
+    alertas = data.get("alertas", [])
 
-    nom_p = clinicos.get('nombre_paciente') or paciente.get('nombre', 'N/A')
-    hc_p = clinicos.get('hc_paciente') or paciente.get('id_paciente', 'N/A')
-    f_p = f"{sesion.get('fecha', '—')} ({sesion.get('hora_inicio', '—')} – {sesion.get('hora_fin', '—')})"
+    nom_p = clinicos.get("nombre_paciente") or "N/A"
+    hc_p = clinicos.get("hc_paciente") or "N/A"
+    record_id = data.get("record_id", "—")
+    duracion = sesion.get("duracion", "—")
 
-    header_html_info = f'<div class="header-box"><div class="header-brand-container">{img_tag}<div><div class="brand-title">TANGO</div><div class="brand-sub">Informe de sesión neumática</div></div></div><div class="header-meta"><strong>Paciente:</strong> {nom_p}<br><strong>ID / HC:</strong> {hc_p}<br><strong>Fecha:</strong> {f_p}</div></div>'
+    header_html_info = (
+        f'<div class="header-box">'
+        f'<div class="header-brand-container">{img_tag}<div>'
+        f'<div class="brand-title">TANGO</div>'
+        f'<div class="brand-sub">Informe de sesión neumática</div></div></div>'
+        f'<div class="header-meta"><strong>Paciente:</strong> {html.escape(nom_p)}<br>'
+        f'<strong>ID / HC:</strong> {html.escape(hc_p)}<br>'
+        f'<strong>Registro:</strong> {html.escape(record_id)}<br>'
+        f'<strong>Duración:</strong> {html.escape(str(duracion))}</div></div>'
+    )
     st.markdown(header_html_info, unsafe_allow_html=True)
 
-    # Métricas Principales
+    # Métricas principales
     c1, c2 = st.columns(2)
     with c1:
-        st.markdown(f'<div class="metric-card"><div class="metric-label">Presión Promedio</div><div class="metric-value">{metricas.get("presion_promedio_mmHg", "—")} <span style="font-size: 16px;">mmHg</span></div></div>', unsafe_allow_html=True)
+        presion_oclusion = metricas.get("presion_alcanzar_oclusion_mmHg", "—")
+        st.markdown(
+            f'<div class="metric-card"><div class="metric-label">Presión al alcanzar oclusión</div>'
+            f'<div class="metric-value">{presion_oclusion} '
+            f'<span style="font-size: 16px;">mmHg</span></div></div>',
+            unsafe_allow_html=True,
+        )
     with c2:
-        st.markdown(f'<div class="metric-card"><div class="metric-label">Tiempo Total Oclusión</div><div class="metric-value">{metricas.get("tiempo_oclusion_total", "—")}</div></div>', unsafe_allow_html=True)
+        st.markdown(
+            f'<div class="metric-card"><div class="metric-label">Tiempo total de oclusión</div>'
+            f'<div class="metric-value">{metricas.get("tiempo_oclusion_total", "—")}</div></div>',
+            unsafe_allow_html=True,
+        )
 
     st.write("")
 
-    # Métricas de la Sesión
-    m_html = f'<div class="report-card"><div class="card-title">Métricas de la Sesión</div><div class="data-row"><span class="data-key">Presión al alcanzar oclusión</span><span class="data-val">{metricas.get("presion_alcanzar_oclusion_mmHg", "—")} mmHg</span></div><div class="data-row"><span class="data-key">Presión máxima registrada</span><span class="data-val">{metricas.get("presion_maxima_mmHg", "—")} mmHg</span></div><div class="data-row"><span class="data-key">Tiempo hasta oclusión inicial</span><span class="data-val">{metricas.get("tiempo_hasta_oclusion_inicial", "—")}</span></div><div class="data-row"><span class="data-key">Reajustes automáticos</span><span class="data-val">{metricas.get("reajustes_automaticos", 0)}</span></div></div>'
+    # Métricas de la sesión
+    m_html = (
+        '<div class="report-card"><div class="card-title">Métricas de la Sesión</div>'
+        f'<div class="data-row"><span class="data-key">Presión máxima registrada</span>'
+        f'<span class="data-val">{metricas.get("presion_maxima_mmHg", "—")} mmHg</span></div>'
+        f'<div class="data-row"><span class="data-key">Tiempo hasta oclusión inicial</span>'
+        f'<span class="data-val">{metricas.get("tiempo_hasta_oclusion_inicial", "—")}</span></div>'
+        f'<div class="data-row"><span class="data-key">Reajustes automáticos</span>'
+        f'<span class="data-val">{metricas.get("reajustes_automaticos", 0)}</span></div>'
+        f'<div class="data-row"><span class="data-key">Firmware del dispositivo</span>'
+        f'<span class="data-val">{html.escape(str(data.get("firmware", "—")))}</span></div></div>'
+    )
     st.markdown(m_html, unsafe_allow_html=True)
 
-    # Registro del Equipo Clínico (Notas estructuradas para máxima legibilidad)
+    # Registro del equipo clínico
     texto_notas = clinicos.get("notas_medico") or "Sin observaciones clínicas registradas."
-    reg_html = f'''
+    reg_html = f"""
     <div class="report-card">
         <div class="card-title">Registro del Equipo Clínico</div>
         <div class="data-row">
             <span class="data-key">Extremidad / Ubicación</span>
-            <span class="data-val">{clinicos.get("extremidad") or "—"}</span>
+            <span class="data-val">{html.escape(clinicos.get("extremidad") or "—")}</span>
         </div>
         <div class="data-row">
             <span class="data-key">Hora de retiro</span>
-            <span class="data-val">{clinicos.get("hora_retiro") or "—"}</span>
+            <span class="data-val">{html.escape(clinicos.get("hora_retiro") or "—")}</span>
         </div>
         <div style="margin-top: 14px;">
             <div class="data-key" style="margin-bottom: 4px;">Notas del médico:</div>
-            <div class="notes-box">{texto_notas}</div>
+            <div class="notes-box">{html.escape(texto_notas)}</div>
         </div>
     </div>
-    '''
+    """
     st.markdown(reg_html, unsafe_allow_html=True)
 
-    # Historial de Reajustes
+    # Historial de reajustes
     reajustes_content = ""
     if reajustes:
         for i, r in enumerate(reajustes, start=1):
-            reajustes_content += f'<div class="log-box"><span class="log-time">{r.get("hora")}</span> — <span class="log-title">Reajuste automático #{i}</span><div class="log-detail">Presión: <b>{r.get("de_mmHg")} mmHg → {r.get("a_mmHg")} mmHg</b> | Duración: {r.get("duracion")}</div></div>'
+            reajustes_content += (
+                f'<div class="log-box"><span class="log-time">t = {html.escape(str(r.get("momento", "—")))}</span> — '
+                f'<span class="log-title">Reajuste automático #{i}</span>'
+                f'<div class="log-detail">Presión: <b>{r.get("de_mmHg", "—")} mmHg → '
+                f'{r.get("a_mmHg", "—")} mmHg</b> | Duración: '
+                f'{html.escape(str(r.get("duracion", "—")))}</div></div>'
+            )
     else:
-        reajustes_content = "<p style='color: #64748B; font-style: italic; margin:0;'>Sin reajustes automáticos durante la sesión.</p>"
+        reajustes_content = (
+            "<p style='color: #64748B; font-style: italic; margin:0;'>"
+            "Sin reajustes automáticos durante la sesión.</p>"
+        )
 
-    st.markdown(f'<div class="report-card"><div class="card-title">Historial de Reajustes</div>{reajustes_content}</div>', unsafe_allow_html=True)
-
-    # Historial de Alertas (Visualización multicolor según tipo de alarma)
-    alertas_content = ""
-    if alertas_filtradas:
-        for a in alertas_filtradas:
-            clase_alerta = obtener_clase_alerta(a.get("texto", ""))
-            alertas_content += f'<div class="log-box {clase_alerta}"><span class="log-time">{a.get("hora")}</span> — <span class="log-title">{a.get("texto")}</span><div class="log-detail">{a.get("detalle", "")}</div></div>'
-    else:
-        alertas_content = "<p style='color: #64748B; font-style: italic; margin:0;'>Sin alertas de oclusión o presión registradas durante la sesión.</p>"
-
-    st.markdown(f'<div class="report-card"><div class="card-title">Historial de Alertas del Sistema</div>{alertas_content}</div>', unsafe_allow_html=True)
-
-    # Botones de descarga apilados
-    st.download_button(
-        label="Descargar PDF",
-        data=f"Informe Clínico TANGO - Paciente: {nom_p} ({hc_p})\nNotas: {texto_notas}",
-        file_name=f"Informe_{hc_p}.pdf",
-        mime="application/pdf",
-        key="btn_pdf"
+    st.markdown(
+        f'<div class="report-card"><div class="card-title">Historial de Reajustes</div>'
+        f'{reajustes_content}</div>',
+        unsafe_allow_html=True,
     )
 
-    csv_datos = f"Paciente,HC,Presion_Promedio_mmHg,Tiempo_Total,Notas\n\"{nom_p}\",\"{hc_p}\",{metricas.get('presion_promedio_mmHg')},{metricas.get('tiempo_oclusion_total')},\"{texto_notas}\""
+    # Historial de alertas
+    alertas_content = ""
+    if alertas:
+        for a in alertas:
+            clase_alerta = obtener_clase_alerta(a.get("tipo", "aviso"))
+            prefijo = "ALARMA" if str(a.get("tipo", "")).lower() == "alarma" else "AVISO"
+            alertas_content += (
+                f'<div class="log-box {clase_alerta}">'
+                f'<span class="log-time">t = {html.escape(str(a.get("momento", "—")))}</span> — '
+                f'<span class="log-title">{prefijo} · {html.escape(str(a.get("texto", "")))}</span>'
+                f'<div class="log-detail">{html.escape(str(a.get("detalle", "")))}</div></div>'
+            )
+    else:
+        alertas_content = (
+            "<p style='color: #64748B; font-style: italic; margin:0;'>"
+            "Sin alertas registradas durante la sesión.</p>"
+        )
+
+    st.markdown(
+        f'<div class="report-card"><div class="card-title">Historial de Alertas del Sistema</div>'
+        f'{alertas_content}</div>',
+        unsafe_allow_html=True,
+    )
+
+    # Descargas
+    resumen_txt = (
+        f"Informe TANGO\n"
+        f"Registro: {record_id}\n"
+        f"Paciente: {nom_p}\n"
+        f"ID / HC: {hc_p}\n"
+        f"Presión al alcanzar oclusión: {metricas.get('presion_alcanzar_oclusion_mmHg', '—')} mmHg\n"
+        f"Presión máxima: {metricas.get('presion_maxima_mmHg', '—')} mmHg\n"
+        f"Tiempo total de oclusión: {metricas.get('tiempo_oclusion_total', '—')}\n"
+        f"Tiempo hasta oclusión inicial: {metricas.get('tiempo_hasta_oclusion_inicial', '—')}\n"
+        f"Reajustes: {metricas.get('reajustes_automaticos', 0)}\n"
+        f"Notas: {texto_notas}\n"
+    )
+    st.download_button(
+        label="Descargar resumen TXT",
+        data=resumen_txt,
+        file_name=f"Informe_{record_id}_{hc_p}.txt",
+        mime="text/plain",
+        key="btn_txt",
+    )
+
+    salida_csv = io.StringIO()
+    writer = csv.writer(salida_csv)
+    writer.writerow([
+        "Registro",
+        "Paciente",
+        "HC",
+        "Presion_Oclusion_mmHg",
+        "Presion_Maxima_mmHg",
+        "Tiempo_Total_Oclusion",
+        "Tiempo_Hasta_Oclusion",
+        "Reajustes",
+        "Notas",
+    ])
+    writer.writerow([
+        record_id,
+        nom_p,
+        hc_p,
+        metricas.get("presion_alcanzar_oclusion_mmHg"),
+        metricas.get("presion_maxima_mmHg"),
+        metricas.get("tiempo_oclusion_total"),
+        metricas.get("tiempo_hasta_oclusion_inicial"),
+        metricas.get("reajustes_automaticos", 0),
+        texto_notas,
+    ])
+
     st.download_button(
         label="Descargar CSV",
-        data=csv_datos,
-        file_name=f"Reporte_{hc_p}.csv",
+        data=salida_csv.getvalue(),
+        file_name=f"Reporte_{record_id}_{hc_p}.csv",
         mime="text/csv",
-        key="btn_csv"
+        key="btn_csv",
     )
 
-    st.caption("Documento generado localmente a partir de los datos exportados por el dispositivo. No requiere conexión.")
+    st.caption(
+        "Documento generado localmente a partir del registro seleccionado del dispositivo. "
+        "Los datos clínicos se incorporan manualmente en esta interfaz."
+    )
+ 
