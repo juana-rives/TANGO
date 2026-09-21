@@ -149,7 +149,6 @@ def adaptar_registro_tango(raw):
 
     return {
         "record_id": raw.get("record_id", "—"),
-        "firmware": raw.get("firmware", "—"),
         "sesion": {
             "duracion_s": sesion_raw.get("duracion_s"),
             "duracion": formatear_tiempo(sesion_raw.get("duracion_s")),
@@ -936,8 +935,7 @@ elif st.session_state.paso == "informe":
         f'<span class="data-val">{metricas.get("tiempo_hasta_oclusion_inicial", "—")}</span></div>'
         f'<div class="data-row"><span class="data-key">Reajustes automáticos</span>'
         f'<span class="data-val">{metricas.get("reajustes_automaticos", 0)}</span></div>'
-        f'<div class="data-row"><span class="data-key">Firmware del dispositivo</span>'
-        f'<span class="data-val">{html.escape(str(data.get("firmware", "—")))}</span></div></div>'
+        '</div>'
     )
     st.markdown(m_html, unsafe_allow_html=True)
 
