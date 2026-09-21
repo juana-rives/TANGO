@@ -7,7 +7,7 @@
   Esta revision se verifica en C++ host con fuentes reales de TFT_eSPI 2.5.44.
   No se realizo compilacion ESP32 ni carga/prueba fisica de esta revision.
   Conserva User_Setup.h, cableado y rotacion 1 del proyecto recibido.
-  NO define pines de TFT, touch, buzzer, backlight ni microSD.
+  Conserva los pines TFT existentes. El backlight se controla por PWM en GPIO25.
 
   Prueba con el Python existente: Serial 115200, U/D/L/R/E.
   21 escenarios estaticos + 1 simulacion secuencial: MENU > SISTEMA >
@@ -26,7 +26,7 @@
   escritura en SD implementada. Para la muestra, tres registros sinteticos viven
   en memoria y pueden consultarse por USB/Serial con @LIST y @GET:<ID>. Esto NO
   demuestra persistencia en microSD; esa integracion sigue pendiente.
-  Brillo y audio tienen estados reales de HMI; sus salidas fisicas son hooks.
+  El brillo controla fisicamente el backlight por PWM; el audio sigue como hook.
   AUDIO_MUTE_MS es ilustrativo, no un parametro clinico validado.
 
   Fuentes FreeSansBold 7-bit: textos de pantalla sin tildes para evitar glifos
@@ -74,6 +74,9 @@ static constexpr uint32_t ZERO_DISPLAY_MS = 1000UL;
 // false = instantes fijos del PPT. true = avanza SOLO los relojes sinteticos.
 static constexpr bool ADVANCE_DEMO_CLOCKS = false;
 static constexpr bool ENABLE_DEMO_CONTROLS = true;
+// Backlight del modulo ILI9488/MSP3520: mover el cable LED de 5V a GPIO25.
+// El modulo incorpora su etapa de conmutacion; este pin recibe la senal PWM.
+static constexpr uint8_t TFT_LED_PIN = 25;
 static constexpr int16_t SCREEN_W = 480, SCREEN_H = 320;
 static constexpr uint32_t TIME_UNAVAILABLE = UINT32_MAX;
 static_assert(AUDIO_MUTE_MS > 0 && AUDIO_MUTE_MS < 3600000UL,
@@ -138,7 +141,6 @@ struct DeviceState {
   bool demoSdAvailable = true;        // dato de maqueta, NO resultado de SD.begin
   char recordId[16] = "TNG-0013";
   uint16_t savedRecords = 2;
-  char firmware[16] = "vX.X";
 };
 // Un instante completo por escenario. Las vistas leen SIEMPRE el mismo estado.
 // La severidad/orden visual son ilustrativos; no constituyen umbrales validados.
@@ -329,6 +331,8 @@ public:
 
   void begin() {
     Serial.begin(115200);
+    pinMode(TFT_LED_PIN, OUTPUT);
+    applyPhysicalBacklight(brightnessPercent);
     tft.init();
     tft.setRotation(1);               // IGUAL al sketch original
     initPalette();
@@ -393,7 +397,6 @@ public:
     if (state.batteryPercent > 100) state.batteryPercent = 100;
     state.activeConditions &= (1U << static_cast<uint8_t>(Condition::Count)) - 1U;
     state.recordId[sizeof(state.recordId)-1] = '\0';
-    state.firmware[sizeof(state.firmware)-1] = '\0';
     // Una condicion NUEVA audible interrumpe el silencio de esta demostracion.
     // No confundir esta politica ilustrativa con una regla clinica validada.
     if (state.activeConditions & ~lastAudioConditions) cancelMute();
@@ -597,8 +600,7 @@ public:
   void sendRecord(const DemoRecord &r) {
     Serial.println("###TANGO_RECORD_BEGIN###");
     Serial.print("{\"schema_version\":\"1.0\",\"demo\":true,\"record_id\":\"");
-    Serial.print(r.id); Serial.print("\",\"firmware\":\""); Serial.print(state.firmware);
-    Serial.print("\",\"sesion\":{\"duracion_s\":"); Serial.print(r.sessionDurationSeconds);
+    Serial.print(r.id); Serial.print("\",\"sesion\":{\"duracion_s\":"); Serial.print(r.sessionDurationSeconds);
     Serial.print("},\"metricas\":{\"tiempo_oclusion_total_s\":"); Serial.print(r.occlusionTotalSeconds);
     Serial.print(",\"presion_alcanzar_oclusion_mmHg\":"); Serial.print(r.pressureAtOcclusion);
     Serial.print(",\"presion_maxima_mmHg\":"); Serial.print(r.maximumPressure);
@@ -660,7 +662,7 @@ public:
     demo.procedureActive=d.recording; demo.recordingActive=d.recording;
     demo.savedRecords=d.savedRecords;
     if(d.operation==Operation::Terminado) { record3Ready=true; demo.savedRecords=3; }
-    // Los 21 instantes del PPT comparten ID TNG-0013 y firmware vX.X.
+    // Los 21 instantes del PPT comparten el ID de demostracion TNG-0013.
     selectedDemo=index;
     cancelMute(); // cargar OTRO instante reinicia la demo; navegar NO lo hace.
     setDeviceState(demo);
@@ -1019,9 +1021,11 @@ private:
     Serial.println(enabled ? "AUDIO solicitado" : "AUDIO detenido");
   }
   void applyPhysicalBacklight(uint8_t percent) {
-    // HOOK: conectar SOLO cuando se conozca el circuito/pin de backlight.
-    // No analogWrite/ledcWrite: no se altera un pin ajeno ni se promete PWM.
-    (void)percent;
+    if (percent > 100) percent = 100;
+    // PWM 8-bit: 0 = apagado, 255 = brillo maximo.
+    // La HMI limita el ajuste visible a 10..100 %.
+    const uint8_t duty = static_cast<uint8_t>((static_cast<uint16_t>(percent) * 255U) / 100U);
+    analogWrite(TFT_LED_PIN, duty);
   }
 
   // ====================== 6. WIDGETS / PARCHE PARCIAL =========================
@@ -1386,16 +1390,16 @@ private:
   void informationValue(uint8_t i) {
     char b[32];
     if(i==0) snprintf(b,sizeof(b),"%s",sensorName());
-    else if(i==1) {
+    else {
       const char *status=(state.activeConditions&conditionBit(Condition::BateriaCritica))?"Critica":
         (state.activeConditions&conditionBit(Condition::BateriaBaja))?"Baja":"Normal";
       snprintf(b,sizeof(b),"%u%% %s",state.batteryPercent,status);
-    } else snprintf(b,sizeof(b),"%s",state.firmware);
+    }
     rowValue(b,informationRow(i),FSSB9);
   }
   void drawInformation() {
-    const char *labels[]={"Sensor de presion","Bateria","Firmware"};
-    for(uint8_t i=0;i<3;++i) { rowLabel(labels[i],informationRow(i)); informationValue(i); }
+    const char *labels[]={"Sensor de presion","Bateria"};
+    for(uint8_t i=0;i<2;++i) { rowLabel(labels[i],informationRow(i)); informationValue(i); }
   }
   Rect recordsRow(uint8_t i) const { return {18,static_cast<int16_t>(100+i*27),444,25}; }
   void recordsValue(uint8_t i) {
@@ -1574,7 +1578,6 @@ public:
       case Screen::Informacion:
         if(state.pressureSensor!=painted.pressureSensor) informationValue(0);
         if(batteryChanged) informationValue(1);
-        if(strcmp(state.firmware,painted.firmware)) informationValue(2);
         break;
       case Screen::Registros:
         if(state.procedureActive!=painted.procedureActive || state.recordingActive!=painted.recordingActive ||
