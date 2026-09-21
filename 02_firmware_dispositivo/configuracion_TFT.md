@@ -21,6 +21,7 @@
 | RESET | 4 |
 | MISO / SDO | 19 en configuración de librería; no conectado físicamente en la configuración actual |
 | GND | GND |
+| LED | 25 |
 
 ## Configuración de `TFT_eSPI`
 
