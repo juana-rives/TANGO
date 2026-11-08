@@ -60,7 +60,7 @@ Contiene todo lo relacionado con el sistema neumático del proyecto.
 
 ## Impresión 3D
 
-Carpeta: [`impresion-3d/`](impresion-3d/)
+Carpeta: [`impresion-3D/`](impresion-3D/)
 
 Contiene las piezas que se fabrican por impresión 3D.
 
