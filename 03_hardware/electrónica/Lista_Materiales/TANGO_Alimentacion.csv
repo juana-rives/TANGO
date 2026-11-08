@@ -1,0 +1,5 @@
+"Reference","Qty","Value","Footprint","Datasheet"
+"J1,J3,J5","3","Conn_01x02_Pin","Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical",""
+"J2,J4","2","Conn_01x03_Pin","Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical",""
+"U1","1","LM2596S-ADJ","StepDown:YAAJ_DCDC_StepDown_LM2596","http://www.ti.com/lit/ds/symlink/lm2596.pdf"
+"U2","1","LM2596S-ADJ","MisHuellas:MP1584_buck_module","http://www.ti.com/lit/ds/symlink/lm2596.pdf"

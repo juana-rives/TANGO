@@ -1,0 +1,7 @@
+"Reference","Qty","Value","Footprint","Datasheet"
+"BZ1","1","Buzzer","Buzzer_Beeper:Buzzer_12x9.5RM7.6",""
+"D1,D2","2","LED","LED_THT:LED_D5.0mm",""
+"J1","1","Conn_01x05_Pin","Connector_PinHeader_2.54mm:PinHeader_1x05_P2.54mm_Vertical",""
+"R1,R2,R3","3","220","Resistor_SMD:R_1206_3216Metric",""
+"R4","1","10 K","Resistor_SMD:R_1206_3216Metric",""
+"SW1","1","SW_Push","Button_Switch_THT:SW_PUSH-12mm",""

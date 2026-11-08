@@ -1,0 +1,4 @@
+"Reference","Qty","Value","Footprint","Datasheet"
+"J1,J2","2","Conn_01x19_Pin","Connector_PinHeader_2.54mm:PinHeader_1x19_P2.54mm_Vertical",""
+"J3,J4,J5","3","Conn_01x02_Pin","Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical",""
+"U1","1","ESP32-DevKitC-Clon","MisHuellas:ESP32-DevKitC","https://docs.espressif.com/projects/esp-idf/zh_CN/latest/esp32/hw-reference/esp32/get-started-devkitc.html"
