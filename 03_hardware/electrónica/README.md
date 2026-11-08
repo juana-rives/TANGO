@@ -36,6 +36,3 @@ El proyecto se compone de 6 placas:
 
 - Tensión de operación: 12V
 
-## Más información
-
-Para las instrucciones de ensamblaje y la descripción general del proyecto, ver el [README principal](../README.md).
