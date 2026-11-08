@@ -33,12 +33,6 @@ El proyecto se compone de 6 placas diseñadas en KiCad:
 - `schematics/`: esquemáticos del circuito
 - `pcb/`: diseños de las placas
 - `materiales/`: lista de materiales de cada placa en CSV
-  - [Placa 1](electronica/materiales/placa-1.csv)
-  - [Placa 2](electronica/materiales/placa-2.csv)
-  - [Placa 3](electronica/materiales/placa-3.csv)
-  - [Placa 4](electronica/materiales/placa-4.csv)
-  - [Placa 5](electronica/materiales/placa-5.csv)
-  - [Placa 6](electronica/materiales/placa-6.csv)
 
 **Requisitos:** [KiCad 10](https://www.kicad.org/). Con versiones anteriores es probable que los archivos no abran correctamente.
 
@@ -52,7 +46,7 @@ El proyecto se compone de 6 placas diseñadas en KiCad:
 
 ## Neumática
 
-Carpeta: [`neumatica/`](neumatica/)
+Carpeta: [`neumática/`](neumática/)
 
 Contiene todo lo relacionado con el sistema neumático del proyecto.
 
