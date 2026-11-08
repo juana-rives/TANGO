@@ -1,9 +1,8 @@
-# TANGO
-
 <p align="center">
   <img src="TANGO_LOGO.png" alt="TANGO_LOGO" width="250">
 </p>
 
+# TANGO
 **TANGO** es un prototipo universitario de torniquete neumático automatizado para el control de hemorragias externas graves de extremidades.
 
 El sistema está pensado para funcionar de forma autónoma en el dispositivo. La interfaz web es complementaria y se utiliza para consultar, asociar y visualizar registros de procedimientos.
