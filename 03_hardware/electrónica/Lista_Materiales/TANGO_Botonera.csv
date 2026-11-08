@@ -1,0 +1,7 @@
+"Reference","Qty","Value","Footprint","Datasheet"
+"J1,J2","2","Conn_01x02","Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical",""
+"R1","1","2.2K","Resistor_SMD:R_1206_3216Metric",""
+"R2","1","4.7K","Resistor_SMD:R_1206_3216Metric",""
+"R3,R5","2","10K","Resistor_SMD:R_1206_3216Metric",""
+"R4","1","22K","Resistor_SMD:R_1206_3216Metric",""
+"SW1,SW2,SW3,SW4,SW5","5","SW_Push","Button_Switch_THT:SW_PUSH-12mm",""
