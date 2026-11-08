@@ -16,7 +16,7 @@ hardware/
 
 ## Electrónica
 
-Carpeta: [`electronica/`](electronica/)
+Carpeta: [`03_hardware/electrónica/`](03_hardware/electrónica/) 
 
 El proyecto se compone de 6 placas diseñadas en KiCad:
 
